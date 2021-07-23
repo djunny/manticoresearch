@@ -705,7 +705,7 @@ static KeyDesc_t g_dKeysSource[] =
 
 /// allowed keys for index section
 static KeyDesc_t g_dKeysIndex[] =
-{
+{	{ "seg_dictionary",		    0, NULL },
 	{ "source",					KEY_LIST, NULL },
 	{ "path",					0, NULL },
 	{ "docinfo",				KEY_REMOVED, NULL },

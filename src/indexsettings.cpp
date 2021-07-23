@@ -276,6 +276,7 @@ void DocstoreSettings_t::Format ( SettingsFormatter_c & tOut, FilenameBuilder_i 
 void CSphTokenizerSettings::Setup ( const CSphConfigSection & hIndex, CSphString & sWarning )
 {
 	m_iNgramLen = Max ( hIndex.GetInt ( "ngram_len" ), 0 );
+	m_iType = hIndex("seg_dictionary") ? TOKENIZER_SEG:( hIndex("ngram_chars") ? TOKENIZER_NGRAM : TOKENIZER_UTF8 );
 
 	if ( hIndex ( "ngram_chars" ) )
 	{
@@ -285,6 +286,7 @@ void CSphTokenizerSettings::Setup ( const CSphConfigSection & hIndex, CSphString
 			sWarning = "ngram_chars specified, but ngram_len=0; IGNORED";
 	}
 
+	m_sSegDictionary  = hIndex.GetStr( "seg_dictionary" );
 	m_sCaseFolding = hIndex.GetStr ( "charset_table", SPHINX_DEFAULT_UTF8_TABLE );
 	m_iMinWordLen = Max ( hIndex.GetInt ( "min_word_len", 1 ), 1 );
 	m_sNgramChars = hIndex.GetStr ( "ngram_chars" );
@@ -683,12 +685,12 @@ bool CSphIndexSettings::ParseDocstoreSettings ( const CSphConfigSection & hIndex
 		m_eCompression = Compression_e::LZ4HC;
 	else
 	{
-		sError.SetSprintf ( "unknown compression specified in 'docstore_compression': '%s'\n", sCompression.cstr() ); 
+		sError.SetSprintf ( "unknown compression specified in 'docstore_compression': '%s'\n", sCompression.cstr() );
 		return false;
 	}
 
 	if ( hIndex.Exists("docstore_compression_level") && m_eCompression!=Compression_e::LZ4HC )
-		sWarning.SetSprintf ( "docstore_compression_level works only with LZ4HC compression" ); 
+		sWarning.SetSprintf ( "docstore_compression_level works only with LZ4HC compression" );
 
 	return true;
 }
@@ -1287,6 +1289,7 @@ void SaveTokenizerSettings ( CSphWriter & tWriter, const ISphTokenizer * pTokeni
 	tWriter.PutString ( tSettings.m_sNgramChars.cstr() );
 	tWriter.PutString ( tSettings.m_sBlendChars.cstr() );
 	tWriter.PutString ( tSettings.m_sBlendMode.cstr() );
+	tWriter.PutString ( tSettings.m_sSegDictionary.cstr () );
 }
 
 
@@ -1743,7 +1746,7 @@ enum class MutableName_e
 
 const char * GetMutableName ( MutableName_e eName )
 {
-	switch ( eName ) 
+	switch ( eName )
 	{
 		case MutableName_e::EXPAND_KEYWORDS: return "expand_keywords";
 		case MutableName_e::RT_MEM_LIMIT: return "rt_mem_limit";
@@ -2045,14 +2048,14 @@ bool MutableIndexSettings_c::Save ( CSphString & sBuf ) const
 		return false;
 
 	JsonObj_c tRoot;
-	
+
 	if ( m_dLoaded.BitGet ( (int)MutableName_e::EXPAND_KEYWORDS ) )
 		tRoot.AddStr ( "expand_keywords", GetExpandKwName ( m_iExpandKeywords ) );
 
 	AddInt ( m_dLoaded, MutableName_e::RT_MEM_LIMIT, tRoot, m_iMemLimit );
 	if ( m_dLoaded.BitGet ( (int)MutableName_e::PREOPEN ) )
 		tRoot.AddBool ( "preopen", m_bPreopen );
-	
+
 	AddStr ( m_dLoaded, MutableName_e::ACCESS_PLAIN_ATTRS, tRoot, FileAccessName ( m_tFileAccess.m_eAttr ) );
 	AddStr ( m_dLoaded, MutableName_e::ACCESS_BLOB_ATTRS, tRoot, FileAccessName ( m_tFileAccess.m_eBlob ) );
 	AddStr ( m_dLoaded, MutableName_e::ACCESS_DOCLISTS, tRoot, FileAccessName ( m_tFileAccess.m_eDoclist ) );

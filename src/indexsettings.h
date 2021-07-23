@@ -30,7 +30,8 @@ enum
 {
 	// where was TOKENIZER_SBCS=1 once
 	TOKENIZER_UTF8 = 2,
-	TOKENIZER_NGRAM = 3
+	TOKENIZER_NGRAM = 3,
+	TOKENIZER_SEG = 4
 };
 
 
@@ -318,7 +319,7 @@ public:
 	int64_t		m_iMemLimit;
 	bool		m_bPreopen = false;
 	FileAccessSettings_t m_tFileAccess;
-	
+
 	MutableIndexSettings_c();
 
 	static MutableIndexSettings_c & GetDefaults();

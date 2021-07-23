@@ -2478,11 +2478,59 @@ protected:
 };
 
 
+
+/// globals for CJK word Segmentation, by veelion
+static const char trailingBytesForUTF8[256] = {
+    0,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1, 1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,
+    1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1, 1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,
+    1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1, 1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,
+    1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1, 1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,
+    1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1, 1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,
+    1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1, 1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,
+    2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2, 2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,
+    3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3, 4,4,4,4,4,4,4,4,5,5,5,5,6,6,6,6
+};
+
+
+inline int u8_seqlen(const char *s)
+{
+    return trailingBytesForUTF8[(unsigned int)(unsigned char)s[0]];
+}
+
+typedef char trie_value_t;
+typedef cedar::da<trie_value_t> trie_t;
+
+trie_t * g_pTrie = NULL;
+
+/// UTF-8 CJK word Segmentation tokenizer
+template < bool IS_QUERY >
+class CSphTokenizer_UTF8Seg : public CSphTokenizerBase2
+{
+public:
+						CSphTokenizer_UTF8Seg ();
+	virtual bool		SetSegDictionary ( const char * sConfig, CSphString & sError );
+	virtual void		SetBuffer ( const BYTE * sBuffer, int iLength );
+	virtual BYTE *		GetToken ();
+	virtual ISphTokenizer *		Clone ( ESphTokenizerClone eMode ) const;
+	virtual int			GetCodepointLength ( int iCode ) const;
+	virtual int			GetMaxCodepointLength () const { return m_tLC.GetMaxCodepointLength(); }
+	// ----- trie tree dictionary
+	trie_t * m_pTrie;
+	static const int m_iMachedMax = 128;
+	trie_t::result_pair_type m_pMatchedPair[m_iMachedMax];
+};
+
+
 struct CSphNormalForm
 {
 	CSphString				m_sForm;
 	int						m_iLengthCP;
 };
+
+ISphTokenizer * sphCreateUTF8SegTokenizer ()
+{
+	return new CSphTokenizer_UTF8Seg<false> ();
+}
 
 struct CSphMultiform
 {
@@ -3445,6 +3493,7 @@ ISphTokenizer * ISphTokenizer::Create ( const CSphTokenizerSettings & tSettings,
 	{
 	case TOKENIZER_UTF8:	pTokenizer = sphCreateUTF8Tokenizer (); break;
 	case TOKENIZER_NGRAM:	pTokenizer = sphCreateUTF8NgramTokenizer (); break;
+	case TOKENIZER_SEG:		pTokenizer = sphCreateUTF8SegTokenizer (); break;
 	default:
 		sError.SetSprintf ( "failed to create tokenizer (unknown charset type '%d')", tSettings.m_iType );
 		return nullptr;
@@ -3501,6 +3550,12 @@ ISphTokenizer * ISphTokenizer::Create ( const CSphTokenizerSettings & tSettings,
 	{
 		sError.SetSprintf ( "'ngram_chars': %s", sError.cstr() );
 		return nullptr;
+	}
+
+	if ( !tSettings.m_sSegDictionary.IsEmpty () && !pTokenizer->SetSegDictionary ( tSettings.m_sSegDictionary.cstr (), sError ) )
+	{
+			sError.SetSprintf ( "'seg_dictionary': %s", sError.cstr() );
+			return NULL;
 	}
 
 	return pTokenizer.Leak ();
@@ -4977,6 +5032,382 @@ BYTE * CSphTokenizer_UTF8Ngram<IS_QUERY>::GetToken ()
 	// !COMMIT support other n-gram lengths than 1
 	assert ( m_iNgramLen==1 );
 	return CSphTokenizer_UTF8<IS_QUERY>::GetToken ();
+}
+///////////////////////////////////////////////////
+
+template < bool IS_QUERY >
+CSphTokenizer_UTF8Seg<IS_QUERY>::CSphTokenizer_UTF8Seg ()
+{
+	m_pTrie = NULL;
+	CSphString sTmp;
+	SetCaseFolding ( SPHINX_DEFAULT_UTF8_TABLE, sTmp );
+	m_bHasBlend = false;
+}
+
+template < bool IS_QUERY >
+bool CSphTokenizer_UTF8Seg<IS_QUERY>::SetSegDictionary ( const char * sConfig, CSphString & sError )
+{
+	if(!g_pTrie) {
+		printf("open trie. sConfig: %s\n", sConfig);
+		g_pTrie = new trie_t();
+		if(g_pTrie->open(sConfig) == 0) {
+			printf("opening trie succeeded! sConfig: %s\n", sConfig);
+			m_pTrie = g_pTrie;
+		} else {
+			printf("opening trie failed! sConfig: %s\n", sConfig);
+			//FIXME: throw a exception
+		}
+	} else {
+		m_pTrie = g_pTrie;
+	}
+	return true;
+}
+
+
+template < bool IS_QUERY >
+void CSphTokenizer_UTF8Seg<IS_QUERY>::SetBuffer ( const BYTE * sBuffer, int iLength )
+{
+	assert ( iLength >= 0 );
+	// set buffer
+	m_pBuffer = sBuffer;
+	m_pBufferMax = sBuffer + iLength;
+	m_pCur = sBuffer;
+	m_pTokenStart = m_pTokenEnd = NULL;
+	m_pBlendStart = m_pBlendEnd = NULL;
+
+	m_iOvershortCount = 0;
+	m_bBoundary = m_bTokenBoundary = false;
+}
+
+template < bool IS_QUERY >
+BYTE * CSphTokenizer_UTF8Seg<IS_QUERY>::GetToken ()
+{
+	// inspired by CSphTokenizerBase2::DoGetToken()
+	m_bWasSpecial = false;
+	m_bBlended = false;
+	m_iOvershortCount = 0;
+	m_bTokenBoundary = false;
+	m_bWasSynonym = false;
+
+	int uchar_len;
+
+	while(*m_pCur == '\n') {
+		m_pCur++;
+	}
+	bool IS_BLEND = m_bHasBlend;
+	if_const ( IS_BLEND )
+	{
+		BYTE * pVar = GetBlendedVariant ();
+		if ( pVar )
+			return pVar;
+		m_bBlendedPart = ( m_pBlendEnd!=nullptr );
+	}
+
+	// in query mode, lets capture (soft-whitespace hard-whitespace) sequences and adjust overshort counter
+	// sample queries would be (one NEAR $$$) or (one | $$$ two) where $ is not a valid character
+	bool bGotNonToken = ( !IS_QUERY || m_bPhrase ); // only do this in query mode, never in indexing mode, never within phrases
+	bool bGotSoft = false; // hey Beavis he said soft huh huhhuh
+
+	m_pTokenStart = nullptr;
+	while (true)
+	{
+		uchar_len = u8_seqlen((const char*)m_pCur);
+		if (uchar_len > 2) {
+			// meet CJK
+			if (m_iAccum == 0) break;
+			FlushAccum();
+			return m_sAccum;
+		}
+		const BYTE * const pCur = m_pCur; // to redo special char, if there's a token already
+
+		int iCodePoint;
+		int iCode;
+		if ( pCur<m_pBufferMax && *pCur<128 )
+		{
+			iCodePoint = *m_pCur++;
+			iCode = m_tLC.m_pChunk[0][iCodePoint];
+		} else
+		{
+			iCodePoint = GetCodepoint(); // advances m_pCur
+			iCode = m_tLC.ToLower ( iCodePoint );
+		}
+
+		// handle escaping
+		const bool bWasEscaped = ( IS_QUERY && iCodePoint=='\\' ); // whether current codepoint was escaped
+		if ( bWasEscaped )
+		{
+			iCodePoint = GetCodepoint();
+			iCode = m_tLC.ToLower ( iCodePoint );
+			if ( !Special2Simple ( iCode ) )
+				iCode = 0;
+		}
+
+		// handle eof
+		if ( iCode<0 )
+		{
+			FlushAccum ();
+
+			// suddenly, exceptions
+			if ( m_pExc && m_pTokenStart && CheckException ( m_pTokenStart, pCur, IS_QUERY ) )
+				return m_sAccum;
+
+			// skip trailing short word
+			if ( m_iLastTokenLen<m_tSettings.m_iMinWordLen )
+			{
+				if ( !m_bShortTokenFilter || !ShortTokenFilter ( m_sAccum, m_iLastTokenLen ) )
+				{
+					if ( m_iLastTokenLen )
+						m_iOvershortCount++;
+					m_iLastTokenLen = 0;
+					if_const ( IS_BLEND )
+						BlendAdjust ( pCur );
+					return nullptr;
+				}
+			}
+
+			// keep token end here as BlendAdjust might change m_pCur
+			m_pTokenEnd = m_pCur;
+
+			// return trailing word
+			if_const ( IS_BLEND && !BlendAdjust ( pCur ) )
+				return nullptr;
+			if_const ( IS_BLEND && m_bBlended )
+				return GetBlendedVariant();
+			return m_sAccum;
+		}
+
+		// handle all the flags..
+		if_const ( IS_QUERY )
+			iCode = CodepointArbitrationQ ( iCode, bWasEscaped, *m_pCur );
+		else if ( m_bDetectSentences )
+			iCode = CodepointArbitrationI ( iCode );
+
+		// handle ignored chars
+		if ( iCode & FLAG_CODEPOINT_IGNORE )
+			continue;
+
+		// handle blended characters
+		if_const ( IS_BLEND && ( iCode & FLAG_CODEPOINT_BLEND ) )
+		{
+			if ( m_pBlendEnd )
+				iCode = 0;
+			else
+			{
+				m_bBlended = true;
+				m_pBlendStart = m_iAccum ? m_pTokenStart : pCur;
+			}
+		}
+
+		// handle soft-whitespace-only tokens
+		if ( !bGotNonToken && !m_iAccum )
+		{
+			if ( !bGotSoft )
+			{
+				// detect opening soft whitespace
+				if ( ( iCode==0 && !IsWhitespace ( iCodePoint ) && !IsPunctuation ( iCodePoint ) )
+						|| ( ( iCode & FLAG_CODEPOINT_BLEND ) && !m_iAccum ) )
+				{
+					bGotSoft = true;
+				}
+			} else
+			{
+				// detect closing hard whitespace or special
+				// (if there was anything meaningful in the meantime, we must never get past the outer if!)
+				if ( IsWhitespace ( iCodePoint ) || ( iCode & FLAG_CODEPOINT_SPECIAL ) )
+				{
+					m_iOvershortCount++;
+					bGotNonToken = true;
+				}
+			}
+		}
+
+		// handle whitespace and boundary
+		if ( m_bBoundary && ( iCode==0 ) )
+		{
+			m_bTokenBoundary = true;
+			m_iBoundaryOffset = pCur - m_pBuffer - 1;
+		}
+		m_bBoundary = ( iCode & FLAG_CODEPOINT_BOUNDARY )!=0;
+
+		// handle separator (aka, most likely a token!)
+		if ( iCode==0 || m_bBoundary )
+		{
+			FlushAccum ();
+
+			// suddenly, exceptions
+			if ( m_pExc && CheckException ( m_pTokenStart ? m_pTokenStart : pCur, pCur, IS_QUERY ) )
+				return m_sAccum;
+
+			if_const ( IS_BLEND && !BlendAdjust ( pCur ) )
+				continue;
+
+			if ( m_iLastTokenLen<m_tSettings.m_iMinWordLen
+					&& !( m_bShortTokenFilter && ShortTokenFilter ( m_sAccum, m_iLastTokenLen ) ) )
+			{
+				if ( m_iLastTokenLen )
+					m_iOvershortCount++;
+				continue;
+			} else
+			{
+				m_pTokenEnd = pCur;
+				if_const ( IS_BLEND && m_bBlended )
+					return GetBlendedVariant();
+				return m_sAccum;
+			}
+		}
+
+		// handle specials
+		if ( iCode & FLAG_CODEPOINT_SPECIAL )
+		{
+			// skip short words preceding specials
+			if ( m_iAccum<m_tSettings.m_iMinWordLen )
+			{
+				m_sAccum[m_iAccum] = '\0';
+
+				if ( !m_bShortTokenFilter || !ShortTokenFilter ( m_sAccum, m_iAccum ) )
+				{
+					if ( m_iAccum )
+						m_iOvershortCount++;
+
+					FlushAccum ();
+				}
+			}
+
+			if ( m_iAccum==0 )
+			{
+				m_bNonBlended = m_bNonBlended || ( !( iCode & FLAG_CODEPOINT_BLEND ) && !( iCode & FLAG_CODEPOINT_SPECIAL ) );
+				m_bWasSpecial = !( iCode & FLAG_CODEPOINT_NGRAM );
+				m_pTokenStart = pCur;
+				m_pTokenEnd = m_pCur;
+				AccumCodepoint ( iCode & MASK_CODEPOINT ); // handle special as a standalone token
+			} else
+			{
+				m_pCur = pCur; // we need to flush current accum and then redo special char again
+				m_pTokenEnd = pCur;
+			}
+
+			FlushAccum ();
+
+			// suddenly, exceptions
+			if ( m_pExc && m_pTokenStart && CheckException ( m_pTokenStart, pCur, IS_QUERY ) )
+				return m_sAccum;
+
+			if_const ( IS_BLEND )
+			{
+				if ( !BlendAdjust ( pCur ) )
+					continue;
+				if ( m_bBlended )
+					return GetBlendedVariant();
+			}
+			return m_sAccum;
+		}
+
+		if ( m_iAccum==0 )
+			m_pTokenStart = pCur;
+
+		// tricky bit
+		// heading modifiers must not (!) affected blended status
+		// eg. we want stuff like '=-' (w/o apostrophes) thrown away when pure_blend is on
+		if_const ( IS_BLEND )
+			if_const (!( IS_QUERY && !m_iAccum && sphIsModifier ( iCode & MASK_CODEPOINT ) ) )
+			m_bNonBlended = m_bNonBlended || !( iCode & FLAG_CODEPOINT_BLEND );
+
+		// just accumulate
+		// manual inlining of utf8 encoder gives us a few extra percent
+		// which is important here, this is a hotspot
+		if ( m_iAccum<SPH_MAX_WORD_LEN && ( m_pAccum-m_sAccum+SPH_MAX_UTF8_BYTES<=(int)sizeof(m_sAccum) ) )
+		{
+			iCode &= MASK_CODEPOINT;
+			m_iAccum++;
+			SPH_UTF8_ENCODE ( m_pAccum, iCode );
+		}
+	}
+
+	// Segmentation of CJK
+	const char * cur = (const char *)m_pCur;
+	int iWordLength = 0;
+	int iCount = m_pTrie->commonPrefixSearch(cur, m_pMatchedPair, m_iMachedMax);
+	// printf("0. iCount: %d, %s\n", iCount, cur);
+	m_pTokenStart = m_pCur;
+	if(!iCount || (iCount == 1 && m_pMatchedPair[0].length <= 3)) {
+		iWordLength = uchar_len;
+		m_pCur += iWordLength;
+		m_pTokenEnd = m_pCur;
+		memcpy(m_sAccum, cur, iWordLength);
+		m_sAccum[iWordLength] = '\0';
+		// printf("0. m_sAccum: %s\n", m_sAccum);
+		return m_sAccum;
+	}
+
+	// minimum match
+	iWordLength = m_pMatchedPair[0].length;
+	if(iWordLength <= 3) {
+		iWordLength = m_pMatchedPair[1].length;
+	}
+	unsigned int last_max_length = m_pMatchedPair[iCount-1].length;
+	// printf("1. iWordLength: %d\n", iWordLength);
+	if(iWordLength < 6 || iWordLength >= 4*3) {
+		m_pCur += iWordLength;
+		m_pTokenEnd = m_pCur;
+		memcpy(m_sAccum, cur, iWordLength);
+		m_sAccum[iWordLength] = '\0';
+		// printf("1. m_sAccum: %s\n", m_sAccum);
+		return m_sAccum;
+	}
+
+	const char * next = cur + iWordLength - 3; // backward one CJK character
+	iCount = m_pTrie->commonPrefixSearch(next, m_pMatchedPair, m_iMachedMax);
+	if(!iCount || (iCount == 1 && m_pMatchedPair[0].length <= 3) || m_pMatchedPair[iCount-1].length < last_max_length) {
+		m_pCur += iWordLength;
+		m_pTokenEnd = m_pCur;
+		memcpy(m_sAccum, cur, iWordLength);
+		m_sAccum[iWordLength] = '\0';
+		// printf("2. m_sAccum: %s\n", m_sAccum);
+		return m_sAccum;
+	}
+
+	m_pCur += iWordLength - 3;
+	m_pTokenEnd = m_pCur;
+	memcpy(m_sAccum, cur, iWordLength-3);
+	m_sAccum[iWordLength-3] = '\0';
+	// printf("3. m_sAccum: %s\n", m_sAccum);
+	return m_sAccum;
+}
+
+
+template < bool IS_QUERY >
+int CSphTokenizer_UTF8Seg<IS_QUERY>::GetCodepointLength ( int iCode ) const
+{
+	if ( iCode<128 )
+		return 1;
+
+	int iBytes = 0;
+	while ( iCode & 0x80 )
+	{
+		iBytes++;
+		iCode <<= 1;
+	}
+
+	assert ( iBytes>=2 && iBytes<=4 );
+	return iBytes;
+}
+
+template < bool IS_QUERY >
+ISphTokenizer * CSphTokenizer_UTF8Seg<IS_QUERY>::Clone ( ESphTokenizerClone eMode ) const
+{
+	printf("CSphTokenizer_UTF8Seg->Clone()\n");
+	if ( eMode!=SPH_CLONE_INDEX ) {
+		CSphTokenizer_UTF8Seg<true> *pClone = new CSphTokenizer_UTF8Seg<true>();
+		pClone->CloneBase ( this, eMode );
+		pClone->m_pTrie = this->m_pTrie;
+		return pClone;
+
+	} else {
+		CSphTokenizer_UTF8Seg<false> *pClone = new CSphTokenizer_UTF8Seg<false>();
+		pClone->CloneBase ( this, eMode );
+		pClone->m_pTrie = this->m_pTrie;
+		return pClone;
+	}
 }
 
 //////////////////////////////////////////////////////////////////////////
@@ -7208,7 +7639,7 @@ void Intersect ( READER1 & tReader1, READER2 & tReader2, FUNCTOR & tFunctor )
 	DocID_t tDocID1 = 0, tDocID2 = 0;
 	bool bHaveDocs1 = tReader1.Read ( tDocID1, tRowID1 );
 	bool bHaveDocs2 = tReader2.ReadDocID ( tDocID2 );
-	
+
 	while ( bHaveDocs1 && bHaveDocs2 )
 	{
 		if ( tDocID1 < tDocID2 )
@@ -8379,13 +8810,13 @@ void CSphHitBuilder::cidxHit ( CSphAggregateHit * pHit )
 		}
 
 		/* duplicate hits from duplicated documents
-		... 0x03, 0x03 ... 
-		... 0x8003, 0x8003 ... 
-		... 1, 0x8003, 0x03 ... 
-		... 1, 0x03, 0x8003 ... 
-		... 1, 0x8003, 0x04 ... 
-		... 1, 0x03, 0x8003, 0x8003 ... 
-		... 1, 0x03, 0x8003, 0x03 ... 
+		... 0x03, 0x03 ...
+		... 0x8003, 0x8003 ...
+		... 1, 0x8003, 0x03 ...
+		... 1, 0x03, 0x8003 ...
+		... 1, 0x8003, 0x04 ...
+		... 1, 0x03, 0x8003, 0x8003 ...
+		... 1, 0x03, 0x8003, 0x03 ...
 		*/
 
 		assert ( m_tLastHit.m_iWordPos < pHit->m_iWordPos );
@@ -11309,7 +11740,7 @@ bool CSphIndex_VLN::DoMerge ( const CSphIndex_VLN * pDstIndex, const CSphIndex_V
 		tCtx.m_pBlobRowBuilder = pBlobRowBuilder.Ptr();
 		tCtx.m_pDocstoreBuilder = pDocstoreBuilder.Ptr();
 		tCtx.m_pColumnarBuilder = pColumnarBuilder.Ptr();
-	
+
 		if ( !MergeAttributes(tCtx) )
 			return false;
 	}
@@ -12621,7 +13052,7 @@ void RunFullscan ( ITERATOR & tIterator, TO_STATIC && fnToStatic, const CSphQuer
 	int iIndex = bHasFilterCalc*32 + bHasSortCalc*16 + bHasFilter*8 + bRandomize*4 + bHasTimer*2 + bHasCutoff;
 
 	std::function<void (ITERATOR &, TO_STATIC &&, const CSphQueryContext &, CSphQueryResultMeta &, const VecTraits_T<ISphMatchSorter *> &, CSphMatch &, int, int, int64_t, bool &)> fnScan;
-	
+
 	switch ( iIndex )
 	{
 		case 0:		fnScan = &Fullscan<false, false, false, false, false, false, ITERATOR, TO_STATIC>; break;
@@ -17535,7 +17966,7 @@ void CSphTemplateDictTraits::LoadStopwords ( const char * sFiles, const ISphToke
 
 		// need to store original name to compatible with original behavior of load order
 		// from path defined; from tool CWD; from SHARE_DIR
-		tInfo.m_sFilename = sName; 
+		tInfo.m_sFilename = sName;
 		m_dSWFileInfos.Add ( tInfo );
 
 		if ( !bGotFile )
@@ -18717,7 +19148,7 @@ void InfixBuilder_c<SIZE>::AddWord ( const BYTE * pWord, int iWordLength, int iC
 		}
 		if ( !iLen )
 			iLen = 1;
-		
+
 		// break on tail cut codepoint
 		if ( p+iLen>pWordMax )
 		{

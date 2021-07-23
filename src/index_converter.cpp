@@ -188,10 +188,10 @@ private:
 
 struct Index_t
 {
-	DWORD m_uVersion = 0;	
+	DWORD m_uVersion = 0;
 	int64_t m_iMinMaxIndex = 0;
 	int64_t m_iDocinfo = 0;
-	
+
 	bool m_bArenaProhibit = false;
 	DWORD m_iTotalDocuments = 0;
 	int64_t m_iTotalBytes = 0;
@@ -327,7 +327,7 @@ static void LoadIndexSettings ( IndexSettings_t & tSettings, CSphReader & tReade
 static bool LoadTokenizerSettings ( CSphReader & tReader, CSphTokenizerSettings & tSettings, CSphEmbeddedFiles & tEmbeddedFiles, DWORD uVersion, CSphString & sWarning )
 {
 	tSettings.m_iType = tReader.GetByte ();
-	if ( tSettings.m_iType!=TOKENIZER_UTF8 && tSettings.m_iType!=TOKENIZER_NGRAM )
+	if ( tSettings.m_iType!=TOKENIZER_UTF8 && tSettings.m_iType!=TOKENIZER_NGRAM && tSettings.m_iType!= TOKENIZER_SEG)
 	{
 		sWarning = "can't load an old index with SBCS tokenizer";
 		return false;
@@ -353,6 +353,7 @@ static bool LoadTokenizerSettings ( CSphReader & tReader, CSphTokenizerSettings 
 	tSettings.m_sNgramChars = tReader.GetString ();
 	tSettings.m_sBlendChars = tReader.GetString ();
 	tSettings.m_sBlendMode = tReader.GetString();
+	tSettings.m_sSegDictionary = tReader.GetString();
 
 	return true;
 }
@@ -571,7 +572,7 @@ static bool LoadHeader ( const char * sHeaderName, Index_t & tIndex, CSphString 
 
 	if ( tIndex.m_bStripPath )
 		StripPath ( tIndex.m_tTokSettings.m_sSynonymsFile );
-	
+
 	// dictionary stuff
 	legacy::LoadDictionarySettings ( rdInfo, tIndex.m_tDictSettings, tIndex.m_tEmbeddedDict, tIndex.m_uVersion, sError );
 	if ( !sError.IsEmpty() )
@@ -827,7 +828,7 @@ AttrConverter_t::AttrConverter_t ( const Index_t & tSrc, const CSphSchema & tDst
 	, m_pBlob ( pBlob )
 {
 	m_dDstRow.Reset ( tDst.GetRowSize() );
-	const CSphColumnInfo * pColumnID = tDst.GetAttr ( sphGetDocidName() );		
+	const CSphColumnInfo * pColumnID = tDst.GetAttr ( sphGetDocidName() );
 	assert ( pColumnID );
 	assert ( !pColumnID->m_tLocator.m_bDynamic );
 	m_tLocID = pColumnID->m_tLocator;
@@ -875,7 +876,7 @@ CSphRowitem * AttrConverter_t::NextRow()
 	const CSphVector<CSphColumnInfo> & dAttrs = m_tIndex.m_dSchemaAttrs;
 	ARRAY_FOREACH ( i, dAttrs )
 	{
-		const CSphColumnInfo & tColumnSrc = dAttrs[i];		
+		const CSphColumnInfo & tColumnSrc = dAttrs[i];
 
 		if ( tColumnSrc.m_eAttrType==SPH_ATTR_STRING || tColumnSrc.m_eAttrType==SPH_ATTR_JSON )
 		{
@@ -965,7 +966,7 @@ private:
 	int								m_iInfixCheckpointWordsSize = 0;
 	CSphVector<Checkpoint_t>		m_dCheckpoints;
 	CSphVector<BYTE>				m_dKeywordCheckpoints;
-	
+
 	OpenHash_T<RowID_t, SphDocID_t, HashFunc_Int64_t> m_hDoc2Row;
 	OpenHash_T<DoclistOffsets_t, SphOffset_t, HashFunc_Int64_t> m_hDoclist;
 
@@ -1058,10 +1059,10 @@ bool ConverterPlain_t::WriteAttributes ( Index_t & tIndex, CSphString & sError )
 
 	CSphString sSPA = tIndex.GetFilename(SPH_EXT_SPA);
 	CSphString sSPB = tIndex.GetFilename(SPH_EXT_SPB);
-		 
+
 	if ( !tWriterSPA.OpenFile ( sSPA.cstr(), sError ) )
 		return false;
-	
+
 	const CSphColumnInfo * pBlobLocatorAttr = m_tSchema.GetAttr ( sphGetBlobLocatorName() );
 	AttrIndexBuilder_c tMinMaxBuilder ( m_tSchema );
 
@@ -1106,7 +1107,7 @@ bool ConverterPlain_t::WriteAttributes ( Index_t & tIndex, CSphString & sError )
 	}
 
 	if ( pBlobRowBuilder.Ptr() && !pBlobRowBuilder->Done ( sError ) )
-		return false;		
+		return false;
 
 	tMinMaxBuilder.FinishCollect();
 	const CSphTightVector<CSphRowitem> & dMinMaxRows = tMinMaxBuilder.GetCollected();
@@ -2070,7 +2071,7 @@ static bool SaveRtIndex ( Index_t & tIndex, CSphString & sWarning, CSphString & 
 	// meta v.12
 	wrMeta.PutDword ( tIndex.m_dRtChunkNames.GetLength () );
 	wrMeta.PutBytes ( tIndex.m_dRtChunkNames.Begin(), tIndex.m_dRtChunkNames.GetLengthBytes64 () );
-	
+
 	// meta v.17
 	wrMeta.PutOffset ( DEFAULT_RT_MEM_LIMIT );
 
@@ -2138,7 +2139,7 @@ static bool ConvertPlain ( const CSphString & sName, const CSphString & sPath, b
 			sError.SetSprintf ( "failed to rename index '%s', error: %s", sName.cstr(), sError.cstr() );
 			return false;
 		}
-	} else 
+	} else
 	{
 		if ( !CopyHitlist ( sPath, sPathOut, sError ) )
 		{

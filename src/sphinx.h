@@ -246,6 +246,7 @@ class CSphLowercaser
 	friend class ISphTokenizer;
 	friend class CSphTokenizerBase;
 	friend class CSphTokenizerBase2;
+	template<bool> friend class CSphTokenizer_UTF8Seg;
 
 public:
 				~CSphLowercaser ();
@@ -332,6 +333,9 @@ public:
 
 	/// set n-gram length (for CJK n-gram indexing)
 	virtual void					SetNgramLen ( int ) {}
+
+	/// set dictionary for CJK word segmentation
+	virtual bool SetSegDictionary ( const char *, CSphString & ) { return true; }
 
 	/// load synonyms list
 	virtual bool					LoadSynonyms ( const char * sFilename, const CSphEmbeddedFiles * pFiles, StrVec_t & dWarnings, CSphString & sError ) = 0;
@@ -516,6 +520,9 @@ ISphTokenizer *			sphCreateUTF8Tokenizer ();
 
 /// create UTF-8 tokenizer with n-grams support (for CJK n-gram indexing)
 ISphTokenizer *			sphCreateUTF8NgramTokenizer ();
+
+/// create UTF-8 Seg tokenizer
+ISphTokenizer *			sphCreateUTF8SegTokenizer ();
 
 /////////////////////////////////////////////////////////////////////////////
 // DICTIONARIES
@@ -1411,7 +1418,7 @@ public:
 
 	/// get field index by name, returns -1 if not found
 	virtual int						GetFieldIndex ( const char * sName ) const = 0;
-	
+
 	/// get attr by index
 	virtual const CSphColumnInfo &	GetAttr ( int iIndex ) const = 0;
 
@@ -2205,7 +2212,7 @@ struct FilterTreeItem_t
 {
 	int m_iLeft = -1;		// left node at parser filter operations
 	int m_iRight = -1;		// right node at parser filter operations
-	int m_iFilterItem = -1;	// index into query filters 
+	int m_iFilterItem = -1;	// index into query filters
 	bool m_bOr = false;
 
 	bool operator == ( const FilterTreeItem_t & rhs ) const;
